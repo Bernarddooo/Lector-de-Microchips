@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#1b5e20">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Lector de Chips</title>
+<style>
+  :root { --verde:#1b5e20; --verde2:#2e7d32; --rojo:#c62828; --gris:#f1f3f1; --txt:#1a1a1a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:system-ui,Arial,sans-serif; background:#fff; color:var(--txt); }
+  header { background:var(--verde); color:#fff; padding:14px 16px 12px; text-align:center; }
+  header .logo { font-size:34px; font-weight:900; letter-spacing:8px; padding-left:8px; line-height:1.1; }
+  header .sub { font-size:13px; letter-spacing:2px; text-transform:uppercase; opacity:.85; margin-top:2px; }
+  main { padding:14px; max-width:560px; margin:0 auto; }
+  button { font-size:18px; border:0; border-radius:12px; padding:16px; width:100%; font-weight:700; }
+  .btn-main { background:var(--verde2); color:#fff; }
+  .btn-main.off { background:var(--rojo); }
+  .row { display:flex; gap:10px; margin-top:10px; }
+  .row button { background:var(--gris); color:var(--txt); font-size:16px; padding:14px 6px; }
+  .estado { margin:12px 0; padding:12px; border-radius:10px; background:var(--gris); font-size:16px; text-align:center; }
+  .estado.ok { background:#c8e6c9; }
+  .ultimo { text-align:center; margin:14px 0; }
+  .ultimo .num { font-size:34px; font-weight:800; letter-spacing:1px; word-break:break-all; }
+  .ultimo .aviso { color:var(--rojo); font-weight:700; min-height:22px; }
+  .contador { text-align:center; font-size:18px; margin-bottom:8px; }
+  ol { margin:0; padding:0; list-style:none; max-height:34vh; overflow:auto; border:1px solid #ddd; border-radius:10px; }
+  li { padding:10px 12px; border-bottom:1px solid #eee; font-size:18px; font-variant-numeric:tabular-nums; display:flex; justify-content:space-between; }
+  li:last-child { border-bottom:0; }
+  li.dup { background:#ffebee; }
+  li small { color:#777; }
+  details { margin-top:16px; font-size:14px; }
+  pre { background:#111; color:#9f9; padding:10px; border-radius:8px; max-height:30vh; overflow:auto; white-space:pre-wrap; word-break:break-all; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">PECUS</div>
+  <div class="sub">Lector de chips</div>
+</header>
+<main>
+  <button id="btnConectar" class="btn-main">Conectar lector</button>
+  <div id="estado" class="estado">Desconectado</div>
+
+  <div class="ultimo">
+    <div style="color:#666">Última lectura</div>
+    <div class="num" id="ultimo">—</div>
+    <div class="aviso" id="aviso"></div>
+  </div>
+
+  <div class="contador">Chips leídos: <b id="cuenta">0</b></div>
+  <ol id="lista"></ol>
+
+  <div class="row">
+    <button id="btnCsv">⬇ Descargar</button>
+    <button id="btnCompartir">📤 Compartir</button>
+  </div>
+  <div class="row">
+    <button id="btnCopiar">📋 Copiar</button>
+    <button id="btnBorrar">🗑 Borrar todo</button>
+  </div>
+
+  <details>
+    <summary>Datos técnicos (para diagnóstico)</summary>
+    <pre id="debug">Sin datos todavía.</pre>
+  </details>
+</main>
+
+<script>
+(function(){
+  const LS = 'chips_v1';
+  const $ = id => document.getElementById(id);
+  let chips = [];
+  try { chips = JSON.parse(localStorage.getItem(LS) || '[]'); } catch(e){ chips = []; }
+
+  // ---------- Bluetooth ----------
+  const NUS = '6e400001-b5a3-f393-e0a9-d50e2c735e83';
+  const ISSC = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
+  const short = n => '0000' + n.toString(16).padStart(4,'0') + '-0000-1000-8000-00805f9b34fb';
+  const otros128 = ['6e400001-b5a3-f393-e0a9-e50e24dcca9e','0003cdd0-0000-1000-8000-00805f9b0131',
+    'f000ffc0-0451-4000-b000-000000000000','e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+    'bef8d6c9-9c21-4c9e-b632-bd58c1009f9f','be15bee0-6186-407e-8381-0bd89c4d8df4',
+    '8e400001-f315-4f60-9fb8-838830daea50','00001101-0000-1000-8000-00805f9b34fb'];
+  const rangos = [];
+  for(const [a,b] of [[0xFF00,0xFFFF],[0xFE00,0xFEFF],[0xAE00,0xAEFF],[0xAB00,0xABFF],[0xA000,0xA0FF],
+                      [0x1810,0x18FF],[0xFD00,0xFDFF],[0xFC00,0xFCFF]])
+    for(let i=a;i<=b;i++) rangos.push(short(i));
+  const SERVICIOS = [NUS, ISSC, ...otros128, 'battery_service', 'device_information', 'generic_access', ...rangos];
+
+  let dispositivo = null, deseaConexion = false, buffer = '', timerBuf = null, reintentos = 0;
+
+  function estado(txt, ok){ const e=$('estado'); e.textContent=txt; e.className='estado'+(ok?' ok':''); }
+  function dbg(txt){
+    const d=$('debug'); const lineas=(d.textContent==='Sin datos todavía.'?[]:d.textContent.split('\n'));
+    lineas.push(new Date().toLocaleTimeString()+'  '+txt);
+    d.textContent=lineas.slice(-60).join('\n'); d.scrollTop=d.scrollHeight;
+  }
+
+  async function conectar(){
+    if(!navigator.bluetooth){
+      alert('Este navegador no permite Bluetooth. Abrí la app con Google Chrome en Android.'); return;
+    }
+    try{
+      estado('Buscando lectores… elegí el tuyo en la lista');
+      dispositivo = await navigator.bluetooth.requestDevice({ acceptAllDevices:true, optionalServices:SERVICIOS });
+      deseaConexion = true; reintentos = 0;
+      dispositivo.addEventListener('gattserverdisconnected', alDesconectar);
+      await abrirGatt();
+    }catch(e){
+      estado('No se conectó: '+(e.message||e));
+      dbg('ERROR conectar: '+e);
+    }
+  }
+
+  async function abrirGatt(){
+    estado('Conectando a '+(dispositivo.name||'lector')+'…');
+    const server = await dispositivo.gatt.connect();
+    let suscriptos = 0;
+    let servicios = [];
+    try { servicios = await server.getPrimaryServices(); } catch(e){ dbg('getPrimaryServices: '+e); }
+    dbg('Servicios encontrados: '+servicios.length+' -> '+servicios.map(x=>x.uuid).join(', '));
+    for(const s of servicios){
+      let chars = [];
+      try { chars = await s.getCharacteristics(); } catch(e){ continue; }
+      for(const c of chars){
+        const p = c.properties;
+        dbg('Servicio '+s.uuid.slice(4,8)+' / car. '+c.uuid.slice(4,8)+' ['+
+            [p.read&&'R',p.write&&'W',p.notify&&'N',p.indicate&&'I'].filter(Boolean).join('')+']');
+        if(p.notify || p.indicate){
+          try{
+            await c.startNotifications();
+            c.addEventListener('characteristicvaluechanged', alDato);
+            suscriptos++;
+          }catch(e){ dbg('No se pudo suscribir '+c.uuid+': '+e); }
+        }
+      }
+    }
+    if(suscriptos){
+      estado('✔ Conectado a '+(dispositivo.name||'lector')+' — listo para leer', true);
+      $('btnConectar').textContent='Desconectar'; $('btnConectar').classList.add('off');
+      pedirPantalla();
+    }else{
+      estado('Conectado, pero no encontré datos para escuchar. Mirá "Datos técnicos".');
+    }
+  }
+
+  function alDesconectar(){
+    if(deseaConexion && reintentos < 8){
+      reintentos++;
+      estado('Se perdió la conexión. Reintentando ('+reintentos+')…');
+      setTimeout(async()=>{ try{ await abrirGatt(); reintentos=0; }catch(e){ alDesconectar(); } }, 1500);
+    }else{
+      estado('Desconectado');
+      $('btnConectar').textContent='Conectar lector'; $('btnConectar').classList.remove('off');
+    }
+  }
+
+  function desconectar(){
+    deseaConexion = false;
+    if(dispositivo && dispositivo.gatt.connected) dispositivo.gatt.disconnect();
+    estado('Desconectado');
+    $('btnConectar').textContent='Conectar lector'; $('btnConectar').classList.remove('off');
+  }
+
+  // ---------- Lectura de datos ----------
+  function alDato(ev){
+    const dv = ev.target.value;
+    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    const hex = Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+    let txt = '';
+    for(const b of bytes) txt += (b>=32 && b<127) || b===10 || b===13 ? String.fromCharCode(b) : '';
+    dbg('RX '+hex+'  |  '+JSON.stringify(txt));
+    buffer += txt;
+    clearTimeout(timerBuf);
+    if(/[\r\n]/.test(txt)) procesarBuffer(); else timerBuf = setTimeout(procesarBuffer, 250);
+  }
+
+  function procesarBuffer(){
+    const t = buffer; buffer = '';
+    // buscar números de 15 dígitos (con o sin separadores tipo 032 000123456789 o 032-000123456789)
+    const limpio = t.replace(/[\s\-_.:]/g,'');
+    const m = limpio.match(/\d{15}/g);
+    if(m) m.forEach(agregar);
+  }
+
+  function agregar(num){
+    const repetido = chips.some(c=>c.n===num);
+    chips.push({n:num, t:Date.now(), d:repetido});
+    guardar(); pintar(num, repetido);
+    avisar(repetido);
+  }
+
+  function guardar(){ try{ localStorage.setItem(LS, JSON.stringify(chips)); }catch(e){} }
+
+  function pintar(ultimo, repetido){
+    if(ultimo){ $('ultimo').textContent=ultimo; $('aviso').textContent = repetido ? '⚠ ¡CHIP REPETIDO!' : ''; }
+    $('cuenta').textContent = chips.length;
+    const ol = $('lista'); ol.innerHTML='';
+    chips.slice().reverse().forEach((c,i)=>{
+      const li=document.createElement('li'); if(c.d) li.className='dup';
+      const n=document.createElement('span'); n.textContent=c.n;
+      const h=document.createElement('small'); h.textContent='#'+(chips.length-i);
+      li.append(n,h); ol.appendChild(li);
+    });
+  }
+
+  function avisar(repetido){
+    try{ navigator.vibrate && navigator.vibrate(repetido ? [200,100,200,100,200] : 120); }catch(e){}
+    try{
+      const ac = new (window.AudioContext||window.webkitAudioContext)();
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = repetido ? 300 : 900; o.connect(g); g.connect(ac.destination);
+      g.gain.value = 0.2; o.start(); o.stop(ac.currentTime + (repetido?0.5:0.12));
+    }catch(e){}
+  }
+
+  async function pedirPantalla(){ try{ if(navigator.wakeLock) await navigator.wakeLock.request('screen'); }catch(e){} }
+
+  // ---------- Exportar ----------
+  function csvTexto(){ return 'chip\r\n' + chips.map(c=>c.n).join('\r\n') + '\r\n'; }
+  function nombreArchivo(){ const d=new Date(), p=n=>String(n).padStart(2,'0');
+    return 'chips_'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+'.csv'; }
+
+  $('btnCsv').onclick = ()=>{
+    if(!chips.length) return alert('Todavía no hay chips leídos.');
+    const blob = new Blob(['\ufeff'+csvTexto()], {type:'text/csv'});
+    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=nombreArchivo();
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  $('btnCompartir').onclick = async ()=>{
+    if(!chips.length) return alert('Todavía no hay chips leídos.');
+    const file = new File(['\ufeff'+csvTexto()], nombreArchivo(), {type:'text/csv'});
+    try{
+      if(navigator.canShare && navigator.canShare({files:[file]})) await navigator.share({files:[file], title:'Chips leídos'});
+      else await navigator.share({title:'Chips leídos', text:chips.map(c=>c.n).join('\n')});
+    }catch(e){ /* cancelado */ }
+  };
+  $('btnCopiar').onclick = async ()=>{
+    if(!chips.length) return alert('Todavía no hay chips leídos.');
+    try{ await navigator.clipboard.writeText(chips.map(c=>c.n).join('\n')); alert('Copiado. Pegalo en Excel, Sheets o Notas.'); }
+    catch(e){ alert('No se pudo copiar.'); }
+  };
+  $('btnBorrar').onclick = ()=>{
+    if(!chips.length) return;
+    if(confirm('¿Borrar los '+chips.length+' chips guardados? Descargalos antes si los necesitás.')){
+      chips=[]; guardar(); $('ultimo').textContent='—'; $('aviso').textContent=''; pintar();
+    }
+  };
+  $('btnConectar').onclick = ()=>{ (dispositivo && dispositivo.gatt.connected) ? desconectar() : conectar(); };
+
+  pintar(chips.length ? chips[chips.length-1].n : null, false);
+  if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  }
+})();
+</script>
+</body>
+</html>

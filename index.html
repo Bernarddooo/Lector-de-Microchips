@@ -19,6 +19,7 @@
   button { font-size:18px; border:0; border-radius:12px; padding:16px; width:100%; font-weight:700; }
   .btn-main { background:var(--verde2); color:#fff; }
   .btn-main.off { background:var(--rojo); }
+  .btn-sec { background:var(--gris); color:var(--txt); font-size:15px; padding:12px; margin-bottom:6px; }
   .row { display:flex; gap:10px; margin-top:10px; }
   .row button { background:var(--gris); color:var(--txt); font-size:16px; padding:14px 6px; }
   .estado { margin:12px 0; padding:12px; border-radius:10px; background:var(--gris); font-size:16px; text-align:center; }
@@ -44,6 +45,7 @@
 <main>
   <button id="btnConectar" class="btn-main">Conectar lector</button>
   <div id="estado" class="estado">Desconectado</div>
+  <button id="btnCompleta" class="btn-sec">Otro lector: búsqueda completa</button>
 
   <div class="ultimo">
     <div style="color:#666">Última lectura</div>
@@ -62,6 +64,12 @@
     <button id="btnCopiar">📋 Copiar</button>
     <button id="btnBorrar">🗑 Borrar todo</button>
   </div>
+
+  <details>
+    <summary>Código de canal manual (avanzado)</summary>
+    <p>Si conocés el código (UUID) del servicio del lector, escribilo acá y conectá de nuevo.</p>
+    <input id="uuidExtra" type="text" placeholder="ej: 0000ffe0-0000-1000-8000-00805f9b34fb" style="width:100%;font-size:15px;padding:10px;border:1px solid #bbb;border-radius:8px">
+  </details>
 
   <details>
     <summary>Datos técnicos (para diagnóstico)</summary>
@@ -99,13 +107,34 @@
     d.textContent=lineas.slice(-60).join('\n'); d.scrollTop=d.scrollHeight;
   }
 
-  async function conectar(){
+  const LSU = 'chips_uuid_extra';
+  function uuidsExtra(){
+    let txt = '';
+    try { txt = localStorage.getItem(LSU) || ''; } catch(e){}
+    const out = [];
+    txt.split(/[\s,;]+/).forEach(u=>{
+      u = u.trim().toLowerCase(); if(!u) return;
+      if(/^[0-9a-f]{4}$/.test(u)) out.push(short(parseInt(u,16)));
+      else if(/^[0-9a-f]{8}$/.test(u)) out.push(u+'-0000-1000-8000-00805f9b34fb');
+      else if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(u)) out.push(u);
+    });
+    return out;
+  }
+  function todosLos16bits(){
+    const r = []; for(let i=1;i<=0xFFFF;i++) r.push(short(i)); return r;
+  }
+
+  async function conectar(completa){
     if(!navigator.bluetooth){
       alert('Este navegador no permite Bluetooth. Abrí la app con Google Chrome en Android.'); return;
     }
     try{
       estado('Buscando lectores… elegí el tuyo en la lista');
-      dispositivo = await navigator.bluetooth.requestDevice({ acceptAllDevices:true, optionalServices:SERVICIOS });
+      const lista = completa === true
+        ? [...new Set([...SERVICIOS, ...uuidsExtra(), ...todosLos16bits()])]
+        : [...new Set([...SERVICIOS, ...uuidsExtra()])];
+      dbg('Buscando entre '+lista.length+' canales posibles'+(completa===true?' (búsqueda completa)':''));
+      dispositivo = await navigator.bluetooth.requestDevice({ acceptAllDevices:true, optionalServices:lista });
       deseaConexion = true; reintentos = 0;
       dispositivo.addEventListener('gattserverdisconnected', alDesconectar);
       await abrirGatt();
@@ -249,7 +278,14 @@
       chips=[]; guardar(); $('ultimo').textContent='—'; $('aviso').textContent=''; pintar();
     }
   };
-  $('btnConectar').onclick = ()=>{ (dispositivo && dispositivo.gatt.connected) ? desconectar() : conectar(); };
+  $('btnConectar').onclick = ()=>{ (dispositivo && dispositivo.gatt.connected) ? desconectar() : conectar(false); };
+  $('btnCompleta').onclick = ()=>{
+    if(dispositivo && dispositivo.gatt.connected) desconectar();
+    estado('Preparando búsqueda completa… puede tardar unos segundos');
+    setTimeout(()=>conectar(true), 50);
+  };
+  try{ $('uuidExtra').value = localStorage.getItem(LSU) || ''; }catch(e){}
+  $('uuidExtra').addEventListener('input', ()=>{ try{ localStorage.setItem(LSU, $('uuidExtra').value); }catch(e){} });
 
   pintar(chips.length ? chips[chips.length-1].n : null, false);
   if('serviceWorker' in navigator && location.protocol.startsWith('http')){
